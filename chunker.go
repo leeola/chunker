@@ -13,15 +13,15 @@ const (
 	// WindowSize is the size of the sliding window.
 	windowSize = 64
 
-	// aim to create chunks of 20 bits or about 1MiB on average.
-	averageBits = 20
+	// AverageBits is the default AverageBits used.
+	//
+	// this aims to create chunks of 20 bits or about 1MiB on average.
+	AverageBits = 20
 
 	// MinSize is the default minimal size of a chunk.
 	MinSize = 512 * kiB
 	// MaxSize is the default maximal size of a chunk.
 	MaxSize = 8 * miB
-
-	splitmask = (1 << averageBits) - 1
 
 	chunkerBufSize = 512 * kiB
 )
@@ -67,8 +67,21 @@ type chunkerState struct {
 	digest uint64
 }
 
+// ChunkerConfig exposes common public configuration for the Chunker.
+type ChunkerConfig struct {
+	// AverageBits aims to create chunks of the specified value.
+	AverageBits uint64
+
+	// MinSize is the default minimum size of a chunk.
+	MinSize uint
+
+	// MaxSize is the default maximum size of a chunk.
+	MaxSize uint
+}
+
 type chunkerConfig struct {
-	MinSize, MaxSize uint
+	MinSize, MaxSize       uint
+	AverageBits, splitmask uint64
 
 	pol               Pol
 	polShift          uint
@@ -87,21 +100,36 @@ type Chunker struct {
 
 // New returns a new Chunker based on polynomial p that reads from rd.
 func New(rd io.Reader, pol Pol) *Chunker {
-	return NewWithBoundaries(rd, pol, MinSize, MaxSize)
+	return NewWithConfig(rd, pol, ChunkerConfig{
+		MinSize:     MinSize,
+		MaxSize:     MaxSize,
+		AverageBits: AverageBits,
+	})
 }
 
 // NewWithBoundaries returns a new Chunker based on polynomial p that reads from
 // rd and custom min and max size boundaries
 func NewWithBoundaries(rd io.Reader, pol Pol, min, max uint) *Chunker {
+	return NewWithConfig(rd, pol, ChunkerConfig{
+		MinSize:     min,
+		MaxSize:     max,
+		AverageBits: AverageBits,
+	})
+}
+
+// NewWithConfig returns a new chunker configured via the provided Config.
+func NewWithConfig(rd io.Reader, pol Pol, conf ChunkerConfig) *Chunker {
 	c := &Chunker{
 		chunkerState: chunkerState{
 			buf: make([]byte, chunkerBufSize),
 		},
 		chunkerConfig: chunkerConfig{
-			pol:     pol,
-			rd:      rd,
-			MinSize: min,
-			MaxSize: max,
+			pol:         pol,
+			rd:          rd,
+			MinSize:     conf.MinSize,
+			MaxSize:     conf.MaxSize,
+			AverageBits: conf.AverageBits,
+			splitmask:   calcSplitmask(conf.AverageBits),
 		},
 	}
 
@@ -117,10 +145,12 @@ func (c *Chunker) Reset(rd io.Reader, pol Pol) {
 			buf: c.buf,
 		},
 		chunkerConfig: chunkerConfig{
-			pol:     pol,
-			rd:      rd,
-			MinSize: MinSize,
-			MaxSize: MaxSize,
+			pol:         pol,
+			rd:          rd,
+			MinSize:     c.chunkerConfig.MinSize,
+			MaxSize:     c.chunkerConfig.MaxSize,
+			AverageBits: c.chunkerConfig.AverageBits,
+			splitmask:   c.chunkerConfig.splitmask,
 		},
 	}
 
@@ -298,7 +328,7 @@ func (c *Chunker) Next(data []byte) (Chunk, error) {
 				continue
 			}
 
-			if (digest&splitmask) == 0 || add >= maxSize {
+			if (digest&c.chunkerConfig.splitmask) == 0 || add >= maxSize {
 				i := add - c.count - 1
 				data = append(data, c.buf[c.bpos:c.bpos+uint(i)+1]...)
 				c.count = add
@@ -356,4 +386,8 @@ func appendByte(hash Pol, b byte, pol Pol) Pol {
 	hash |= Pol(b)
 
 	return hash.Mod(pol)
+}
+
+func calcSplitmask(averageBits uint64) uint64 {
+	return (1 << averageBits) - 1
 }
